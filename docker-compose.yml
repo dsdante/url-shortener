@@ -24,6 +24,7 @@ services:
     volumes:
       - url-shortener-data:/app/data
     networks:
+      - edge
       - internal
     # --- container hardening ---
     user: "10001:10001"
