@@ -7,7 +7,6 @@ import httpx
 
 import ipaddress
 import socket
-from urllib.parse import urlparse
 
 from . import config
 

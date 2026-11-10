@@ -9,7 +9,7 @@ It exposes three endpoints:
 | GET    | `/{code}`             | `302` redirect to the original URL              |
 | GET    | `/links/{code}/stats` | `{"code", "url", "clicks"}`                     |
 
-Interactive docs are available at `/docs` (Swagger UI) and `/redoc`.
+Interactive docs are at /docs and /redoc when ENABLE_DOCS=true (the default for local development). Production sets ENABLE_DOCS=false, which disables all three documentation routes.
 
 ## Quick start (local)
 
