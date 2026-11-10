@@ -1,4 +1,8 @@
 services:
+  # -------------------------------------------------------------------------
+  # Application — no published ports, no outbound internet on the default
+  # (internal) network. Only reachable by nginx.
+  # -------------------------------------------------------------------------
   app:
     build:
       context: .
@@ -7,16 +11,32 @@ services:
     container_name: url-shortener
     init: true
     restart: unless-stopped
-    ports:
-      - "${APP_PORT:-8000}:8000"
+    expose:
+      - "8000"
     environment:
       DATABASE_URL: "${DATABASE_URL:-sqlite:////app/data/links.db}"
-      CHECK_URL_AVAILABILITY: "${CHECK_URL_AVAILABILITY:-true}"
+      CHECK_URL_AVAILABILITY: "${CHECK_URL_AVAILABILITY:-false}"
       HTTP_TIMEOUT: "${HTTP_TIMEOUT:-5.0}"
       HTTP_RETRIES: "${HTTP_RETRIES:-2}"
       ENABLE_DOCS: "${ENABLE_DOCS:-false}"
+      APP_ENV: "prod"
+      # Uvicorn trusts X-Forwarded-* only from nginx's subnet.
+      FORWARDED_ALLOW_IPS: "172.28.0.0/16"
     volumes:
       - url-shortener-data:/app/data
+    networks:
+      - internal
+    # --- container hardening ---
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: "1.0"
     healthcheck:
       test:
         - CMD
@@ -34,19 +54,66 @@ services:
       start_period: 5s
       retries: 3
 
-  # Optional Postgres backend. Enable with:
-  #
-  #   docker compose --profile postgres up -d
-  #
-  # and set `DATABASE_URL=postgresql+psycopg2://urls:urls@db:5432/urls`
-  # in `.env`. `psycopg2-binary` must also be added to requirements.txt
-  # (SQLAlchemy ships the dialect, but not the DBAPI driver).
-  #
-  # There is deliberately no `depends_on` here: it would break the default
-  # (SQLite-only) run, because compose treats a dependency on a service
-  # whose profile is inactive as an error. `restart: unless-stopped` on
-  # the app covers the startup race — the app fails, restarts, and connects
-  # once Postgres is accepting connections.
+  # -------------------------------------------------------------------------
+  # Nginx — unprivileged image, the only service with host ports.
+  # Listens on 8080/8443 internally; Docker maps 80/443.
+  # -------------------------------------------------------------------------
+  nginx:
+    image: nginxinc/nginx-unprivileged:1.29-alpine
+    container_name: url-shortener-nginx
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:8080"
+      - "443:8443"
+    environment:
+      DOMAIN: "${DOMAIN:-short.example.com}"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    networks:
+      - edge
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # -------------------------------------------------------------------------
+  # Certbot — renewal loop. Initial issuance is done by
+  # deploy/init-letsencrypt.sh, not by this service.
+  # -------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    container_name: url-shortener-certbot
+    restart: unless-stopped
+    depends_on:
+      nginx:
+        condition: service_started
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    networks:
+      - edge          # needs outbound access to Let's Encrypt ACME servers
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done"
+
+  # -------------------------------------------------------------------------
+  # Optional Postgres — never published, internal network only.
+  # -------------------------------------------------------------------------
   #db:
   #  image: postgres:17-alpine
   #  profiles: ["postgres"]
@@ -58,15 +125,24 @@ services:
   #    POSTGRES_DB: "${POSTGRES_DB:-urls}"
   #  volumes:
   #    - url-shortener-pgdata:/var/lib/postgresql/data
+  #  networks:
+  #    - internal
+  #  security_opt:
+  #    - no-new-privileges:true
+  #  cap_drop: [ALL]
   #  healthcheck:
-  #    # `$${...}` escapes compose interpolation so the shell inside the
-  #    # container expands the variables.
   #    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
   #    interval: 10s
   #    timeout: 3s
   #    retries: 5
-  #    start_period: 5s
+
+networks:
+  edge:
+  internal:
+    internal: true
 
 volumes:
   url-shortener-data:
   url-shortener-pgdata:
+  letsencrypt:
+  certbot-www:
