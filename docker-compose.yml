@@ -54,6 +54,18 @@ services:
       start_period: 5s
       retries: 3
 
+  ui-build:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    image: url-shortener-ui:latest
+    container_name: url-shortener-ui-build
+    restart: "no"
+    volumes:
+      - ui-dist:/out
+    networks:
+      - internal
+
   # -------------------------------------------------------------------------
   # Nginx — unprivileged image, the only service with host ports.
   # Listens on 8080/8443 internally; Docker maps 80/443.
@@ -65,17 +77,21 @@ services:
     depends_on:
       app:
         condition: service_healthy
+      ui-build:
+        condition: service_completed_successfully
     ports:
       - "80:8080"
       - "443:8443"
     environment:
-      DOMAIN: "${DOMAIN:-short.example.com}"
+      DOMAIN: "${DOMAIN:-api.short.example.com}"
+      UI_DOMAIN: "${UI_DOMAIN:-short.example.com}"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/templates:/etc/nginx/templates:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
       - letsencrypt:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro
+      - ui-dist:/usr/share/nginx/html:ro
     networks:
       - edge
       - internal
@@ -147,3 +163,4 @@ volumes:
   url-shortener-pgdata:
   letsencrypt:
   certbot-www:
+  ui-dist:

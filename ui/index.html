@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL Shortener</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="card">
+      <h1>URL Shortener</h1>
+      <form id="shorten-form" novalidate>
+        <label for="url-input" class="visually-hidden">URL to shorten</label>
+        <input
+          id="url-input"
+          type="url"
+          required
+          placeholder="https://example.com/very/long/path"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="submit">Shorten</button>
+      </form>
+      <p id="error" role="alert" hidden></p>
+      <div id="result" hidden>
+        <a id="short-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+        <button id="copy-btn" type="button">Copy</button>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

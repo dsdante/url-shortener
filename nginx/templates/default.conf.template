@@ -1,8 +1,8 @@
-# --- HTTP: ACME challenge + redirect to HTTPS ------------------------------
+# --- HTTP: ACME + redirect for both hostnames -----------------------------
 server {
     listen 8080;
     listen [::]:8080;
-    server_name ${DOMAIN};
+    server_name ${DOMAIN} ${UI_DOMAIN};
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -10,7 +10,6 @@ server {
         try_files $uri =404;
     }
 
-    # NEW: health probe for the Docker healthcheck — never redirects.
     location = /health {
         access_log off;
         proxy_pass http://app:8000/health;
@@ -22,7 +21,67 @@ server {
     }
 }
 
-# --- HTTPS -----------------------------------------------------------------
+# --- HTTPS: UI + same-origin API on links.* -------------------------------
+server {
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    http2 on;
+    server_name ${UI_DOMAIN};
+
+    ssl_certificate         /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/chain.pem;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    include /etc/nginx/snippets/security-headers-ui.conf;
+    limit_conn addr 20;
+
+    # Never serve dotfiles, source maps, or script extensions.
+    location ~ /\. { deny all; return 404; }
+    location ~* \.(php|asp|aspx|jsp|cgi|map)$ { deny all; return 404; }
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location = /health {
+        access_log off;
+        proxy_pass http://app:8000/health;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    location = /links {
+        limit_req zone=create burst=3 nodelay;
+        limit_req_status 429;
+        client_max_body_size 16k;
+        proxy_pass http://app:8000/links;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    location ~ ^/links/[A-Za-z0-9]+/stats$ {
+        limit_req zone=general burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    # Short code redirect: base62 only, so /favicon.ico, /assets/*.js etc.
+    # fall through to the static handler below. This is why the regex is
+    # case-sensitive and explicitly has no dots.
+    location ~ "^/[A-Za-z0-9]{1,16}$" {
+        limit_req zone=general burst=40 nodelay;
+        limit_req_status 429;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    # Single-page app: any other path serves index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# --- HTTPS: API-only on api.* ---------------------------------------------
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -31,14 +90,12 @@ server {
 
     ssl_certificate         /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key     /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/chain.pem;
+    ssl_stapling on;
+    ssl_stapling_verify on;
 
     include /etc/nginx/snippets/security-headers.conf;
-
     limit_conn addr 20;
-
-    # Never serve dotfiles, source maps, or script extensions.
-    location ~ /\. { deny all; return 404; }
-    location ~* \.(php|asp|aspx|jsp|cgi|map)$ { deny all; return 404; }
 
     location = /health {
         access_log off;
@@ -46,7 +103,6 @@ server {
         include /etc/nginx/snippets/proxy.conf;
     }
 
-    # Link creation: 5 requests/minute per IP, 16 KiB body cap.
     location = /links {
         limit_req zone=create burst=3 nodelay;
         limit_req_status 429;
