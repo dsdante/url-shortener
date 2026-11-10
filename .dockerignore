@@ -1,0 +1,11 @@
+__pycache__
+*.pyc
+*.pyo
+*.db
+data/
+.venv
+.git
+.github
+.pytest_cache
+tests
+README.md

@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel superseded runs on the same branch/PR — saves runner minutes and
+# makes the latest commit's result the one that matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      # Don't abort the 3.13 run when 3.14 fails — the matrix is meant to
+      # tell us *which* interpreter broke.
+      fail-fast: false
+      matrix:
+        # 3.14 is what the Dockerfile and the local venv use; 3.13 is the
+        # compatibility floor we care about. If README claims 3.11+, add it
+        # here only after verifying the pinned deps resolve on it.
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Fails if any installed package has an unsatisfied or conflicting
+          # dependency — catches "works on my machine" pin drift early.
+          pip check
+
+      - name: Check whether the starlette workaround can be dropped
+        continue-on-error: true
+        run: |
+          pip install --dry-run --upgrade "starlette>=1.7.0" 2>&1 | grep -q "fastapi" \
+            && echo "::warning::Starlette 1.7.0 is still blocked by fastapi's pin" \
+            || echo "::warning::Starlette 1.7.0 may now be installable — remove the filterwarnings entry from pytest.ini"
+
+      - name: Run tests
+        env:
+          # tests/conftest.py also sets this, but being explicit documents
+          # that CI never makes outbound HTTP requests.
+          CHECK_URL_AVAILABILITY: "false"
+        run: pytest -q
+
+  docker:
+    name: docker build & smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        # Catches YAML errors and bad ${VAR:-default} interpolation without
+        # starting anything. Profiled services are rendered too.
+        run: docker compose config --quiet
+
+      - name: Build image
+        run: docker build -t url-shortener:ci .
+
+      - name: Smoke test
+        env:
+          CHECK_URL_AVAILABILITY: "false"
+          ENABLE_DOCS: "false"
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8000:8000 \
+            -e CHECK_URL_AVAILABILITY \
+            -e ENABLE_DOCS \
+            url-shortener:ci
+
+          # Wait for /health, up to ~30s.
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::service did not become healthy"
+            docker logs smoke
+            exit 1
+          fi
+
+          # Create a link.
+          code=$(curl -fsS -X POST http://127.0.0.1:8000/links \
+                   -H 'content-type: application/json' \
+                   -d '{"url":"https://example.com"}' | jq -r .code)
+          test -n "$code"
+          echo "created code=$code"
+
+          # Redirect must point at the original URL.
+          loc=$(curl -s -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:8000/$code")
+          case "$loc" in
+            https://example.com*) ;;
+            *) echo "::error::unexpected redirect target: $loc"; exit 1 ;;
+          esac
+
+          # Stats must have counted the click.
+          clicks=$(curl -fsS "http://127.0.0.1:8000/links/$code/stats" | jq -r .clicks)
+          test "$clicks" = "1"
+
+          # ENABLE_DOCS=false must actually hide all three doc routes.
+          for path in /docs /redoc /openapi.json; do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8000$path")
+            test "$status" = "404" || { echo "::error::$path returned $status"; exit 1; }
+          done
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker logs smoke || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f smoke || true

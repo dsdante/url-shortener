@@ -1,0 +1,72 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: url-shortener:latest
+    container_name: url-shortener
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-sqlite:////app/data/links.db}"
+      CHECK_URL_AVAILABILITY: "${CHECK_URL_AVAILABILITY:-true}"
+      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-5.0}"
+      HTTP_RETRIES: "${HTTP_RETRIES:-2}"
+      ENABLE_DOCS: "${ENABLE_DOCS:-false}"
+    volumes:
+      - url-shortener-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          try:
+              r = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)
+              sys.exit(0 if r.status == 200 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  # Optional Postgres backend. Enable with:
+  #
+  #   docker compose --profile postgres up -d
+  #
+  # and set `DATABASE_URL=postgresql+psycopg2://urls:urls@db:5432/urls`
+  # in `.env`. `psycopg2-binary` must also be added to requirements.txt
+  # (SQLAlchemy ships the dialect, but not the DBAPI driver).
+  #
+  # There is deliberately no `depends_on` here: it would break the default
+  # (SQLite-only) run, because compose treats a dependency on a service
+  # whose profile is inactive as an error. `restart: unless-stopped` on
+  # the app covers the startup race — the app fails, restarts, and connects
+  # once Postgres is accepting connections.
+  #db:
+  #  image: postgres:17-alpine
+  #  profiles: ["postgres"]
+  #  container_name: url-shortener-db
+  #  restart: unless-stopped
+  #  environment:
+  #    POSTGRES_USER: "${POSTGRES_USER:-urls}"
+  #    POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-urls}"
+  #    POSTGRES_DB: "${POSTGRES_DB:-urls}"
+  #  volumes:
+  #    - url-shortener-pgdata:/var/lib/postgresql/data
+  #  healthcheck:
+  #    # `$${...}` escapes compose interpolation so the shell inside the
+  #    # container expands the variables.
+  #    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  #    interval: 10s
+  #    timeout: 3s
+  #    retries: 5
+  #    start_period: 5s
+
+volumes:
+  url-shortener-data:
+  url-shortener-pgdata:
