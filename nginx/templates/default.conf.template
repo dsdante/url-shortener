@@ -1,4 +1,6 @@
-# --- HTTP: ACME + redirect for both hostnames -----------------------------
+# ===========================================================================
+# HTTP: ACME challenges + redirect to HTTPS, for both hostnames.
+# ===========================================================================
 server {
     listen 8080;
     listen [::]:8080;
@@ -10,6 +12,8 @@ server {
         try_files $uri =404;
     }
 
+    # Plain-HTTP health probe. Kept here so container healthchecks and
+    # uptime monitors do not have to follow a redirect.
     location = /health {
         access_log off;
         proxy_pass http://app:8000/health;
@@ -21,7 +25,9 @@ server {
     }
 }
 
-# --- HTTPS: UI + same-origin API on links.* -------------------------------
+# ===========================================================================
+# HTTPS on the UI hostname: static SPA + same-origin API.
+# ===========================================================================
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -36,10 +42,6 @@ server {
 
     include /etc/nginx/snippets/security-headers-ui.conf;
     limit_conn addr 20;
-
-    # Never serve dotfiles, source maps, or script extensions.
-    location ~ /\. { deny all; return 404; }
-    location ~* \.(php|asp|aspx|jsp|cgi|map)$ { deny all; return 404; }
 
     root /usr/share/nginx/html;
     index index.html;
@@ -65,9 +67,9 @@ server {
         include /etc/nginx/snippets/proxy.conf;
     }
 
-    # Short code redirect: base62 only, so /favicon.ico, /assets/*.js etc.
-    # fall through to the static handler below. This is why the regex is
-    # case-sensitive and explicitly has no dots.
+    # Short-code redirect. The regex is quoted — `{1,16}` would otherwise
+    # be parsed as a block delimiter and break startup with
+    # "unknown directive …".
     location ~ "^/[A-Za-z0-9]{1,16}$" {
         limit_req zone=general burst=40 nodelay;
         limit_req_status 429;
@@ -75,13 +77,15 @@ server {
         include /etc/nginx/snippets/proxy.conf;
     }
 
-    # Single-page app: any other path serves index.html.
+    # SPA fallback: everything else serves index.html.
     location / {
         try_files $uri $uri/ /index.html;
     }
 }
 
-# --- HTTPS: API-only on api.* ---------------------------------------------
+# ===========================================================================
+# HTTPS on the API hostname: API only, no SPA.
+# ===========================================================================
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -96,6 +100,41 @@ server {
 
     include /etc/nginx/snippets/security-headers.conf;
     limit_conn addr 20;
+
+    # ---------------------------------------------------------------------
+    # Documentation routes.
+    #
+    # Must be *exact-match* (`location = …`), not regex. The short-code
+    # regex below matches `/docs` (4 alphanumeric chars), and Nginx uses
+    # the FIRST matching regex in file order — so `location ~ ^/(docs|…)$`
+    # placed after it would be shadowed, the request would hit the
+    # short-code block, inherit the strict CSP, and the browser would
+    # refuse to load Swagger's CDN assets (blank page).
+    #
+    # Exact matches always beat regex, regardless of order.
+    #
+    # They include security-headers-docs.conf because *any* `add_header`
+    # in a location disables inheritance of the server-level
+    # `add_header` set — including HSTS. Repeating the full set here is
+    # what keeps HSTS on these routes.
+    # ---------------------------------------------------------------------
+    location = /docs {
+        include /etc/nginx/snippets/security-headers-docs.conf;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    location = /redoc {
+        include /etc/nginx/snippets/security-headers-docs.conf;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    location = /openapi.json {
+        include /etc/nginx/snippets/security-headers-docs.conf;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
 
     location = /health {
         access_log off;
@@ -113,6 +152,13 @@ server {
 
     location ~ ^/links/[A-Za-z0-9]+/stats$ {
         limit_req zone=general burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://app:8000;
+        include /etc/nginx/snippets/proxy.conf;
+    }
+
+    location ~ "^/[A-Za-z0-9]{1,16}$" {
+        limit_req zone=general burst=40 nodelay;
         limit_req_status 429;
         proxy_pass http://app:8000;
         include /etc/nginx/snippets/proxy.conf;
